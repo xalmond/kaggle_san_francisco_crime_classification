@@ -323,7 +323,7 @@ best[,6:7]
 
 ```
 
-## 6.- Entrenamiento del modelo y predicción final.
+## 6.- Entrenamiento del modelo y predicción final
 
 A continuación, se entrena el modelo sobre el conjunto de datos de training, pero esta vez utilizando los parámetros que maximizan el valor de `model_cv$test.mlogloss.mean` del anterior apartado de cross-validation. Finalmente, utilizando el modelo entrenado se predicen las categorías de los delitos utilizando los datos de test y se prepara el fichero para adjuntar en el portal de kaggle.
 
@@ -386,9 +386,9 @@ write.csv(submission, "./data/submission.csv", row.names = FALSE)
 ```
 
 
-### Resultado en Kaggle.
+### Resultado en Kaggle
 
-A día 28 de Mayo de 2015, con una puntuación (mlogloss) de **2.33369** y a falta de 10 días para concluir la competición, la posición de la predicción efectuada en este proyecto ocupa la posición número **319 de 2164** equipos participantes en la [tabla pública de resultados de kaggle](https://www.kaggle.com/c/sf-crime/leaderboard).
+A día 28 de Mayo de 2015, con una puntuación (mlogloss) de **2.33312** y a falta de 10 días para concluir la competición, la posición de la predicción efectuada en este proyecto ocupa la posición número **319 de 2164** equipos participantes en la [tabla pública de resultados de kaggle](https://www.kaggle.com/c/sf-crime/leaderboard).
 
 ![](./images/position.jpg)
 
@@ -405,10 +405,9 @@ xgb.plot.importance(imp_matrix, numberOfClusters = 3)
 
 Como puede observarse, las variables de posición contribuyen en mayor medida al modelo matemático que las temporales, siendo la longitud y latitud aquellas que más contribuyen a predecir la categoría del delito cometido. Así mismo, las variables adicionales relacionadas con la distancia entre el punto donde se cometió el delito y estaciones de policía son de gran importancia para categorizar los delitos cometidos en San Francisco.
 
-En cuanto a la estacionalidad de los delitos, la hora en que cometieron es el parámetro que más ayuda a categorizarlos, por encima de otros como la época del año, el día de la semana, o la nocturnidad. En concreto, llama la atención la mayor importancia de la variable `Year`, que las variables `WeekDay` y `Month`, lo que daría a entender que la morfología criminal depende más de una situación coyuntural a medio plazo que de una estacionalidad semanal o mensual.  Cabe mencionar que las condiciones meteorológicas ayudan a aumentar la exactitud a la hora de predecir qué tipo de delitos se cometen un día, siendo la temperatura media de mayor valor que el nivel de lluvia.
+En cuanto a la estacionalidad de los delitos, la hora en que cometieron es el parámetro que más ayuda a categorizarlos, por encima de otros como la época del año, el día de la semana, o la nocturnidad. En concreto, llama la atención la mayor importancia de la variable `Year`, que las variables `WeekDay` y `Month`, lo que daría a entender que la morfología criminal depende más de una situación coyuntural a medio plazo que de una estacionalidad semanal o mensual. Cabe mencionar que las condiciones meteorológicas ayudan a aumentar la exactitud a la hora de predecir qué tipo de delitos se cometen un día, siendo la temperatura media de mayor valor que el nivel de lluvia.
 
-En definitiva, a la hora planificar una política de seguridad ciudadana según la tipología de los delitos, es mucho más importante saber dónde se cometen que cuando se comenten.
-
+> En definitiva, a la hora planificar una política de seguridad ciudadana según la tipología de los delitos, aporta mucha más información saber dónde se cometen que cuándo se cometen.
 
 ## 8.- Referencias
 
