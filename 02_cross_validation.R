@@ -61,7 +61,7 @@ if (param_done){
   write.csv(best_param,"./data/result_param.csv", row.names = FALSE)
 }
 
-best_param[1,-6]
+best_param[1,1:5]
 
 # Selecting best number of iteractions
 

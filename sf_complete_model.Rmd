@@ -1,0 +1,420 @@
+
+## Kaggle: San Francisco Crime Classification
+##### Proyecto Final del Máster de Data Science de [KSchool](http://www.kschool.com/) - Notebook por [Javier Almendro](https://www.linkedin.com/in/javieralmendro)
+
+## 1.- Introducción
+
+[Kaggle](http://www.kaggle.com) acoge una competición destinada a la comunidad de Machine Learning con el título ["San Francisco Crime Classification"](https://www.kaggle.com/c/sf-crime).
+
+![](./images/sfcrime_banner.png)  
+
+Dicha competición aporta un conjunto de datos con los delitos cometidos en todos los distritos de San Francisco a lo largo de más de 12 años. El objetivo de la competición consiste en, dados un lugar y una fecha, predecir la categoría del delito cometido. El conjunto de datos es aportado por [SF OpenData](https://data.sfgov.org), que es el portal de datos de la ciudad de San Francisco.
+
+### Librerías requeridas
+
+Este notebook utiliza las siguientes librerías de R:
+
+```{r results='hide', message=FALSE, warning=FALSE}
+
+library(lubridate)
+library(timeDate)
+library(RCurl)
+library(RJSONIO)
+library(glmnet)
+library(xgboost)
+library(Ckmeans.1d.dp)
+library(ggplot2)
+library(data.table)
+
+```
+
+## 2.- Lectura de los datos y análisis preliminar
+
+### Origen de los datos
+
+SF OpenData aporta un conjunto de datos sobre el lugar donde se cometió el delito y el momento exacto cuando se cometió: 
+
+1. [training.csv](https://www.kaggle.com/c/sf-crime/download/train.csv.zip). Incluye una columna llamada `Category` que contiene las 39 categorías diferentes en las que se catalogan todos los delitos
+2. [test.csv](https://www.kaggle.com/c/sf-crime/download/test.csv.zip). Fichero de datos con los que predecir la categoría de cada delito, en función del lugar y momento que se cometieron.
+
+### Lectura de los ficheros de datos
+
+```{r}
+
+train <- read.csv("data/train.csv", stringsAsFactors = FALSE)
+str(train)
+print(unique(train$Category))
+
+test <- read.csv("data/test.csv", stringsAsFactors = FALSE)
+str(test)
+
+```
+
+## 3.- Preparación de los conjuntos de datos
+
+### Tratamiento de Outliers
+
+En esta fase preliminar se observa la aparición de outliers en ambos datasets training y test. En concreto, en las únicas variables numéricas `X` e `Y` (longitud y latitud del lugar donde se cometió el delito) aparecen valores que no se corresponden con posiciones de la ciudad de San Francisco (90ºN-120º50'W). 
+
+Dichos valores son sustituidos por los datos de longitud y latitud entregados por la [API de Google Maps](https://developers.google.com/maps/documentation/directions/) para la dirección contenida en la columna `Address` del dato outlier.
+
+```{r}
+
+apply(train[,c("X","Y")],2,fivenum)
+apply(test[,c("X","Y")],2,fivenum)
+
+```
+
+### Construcción de variables
+
+En general, cuanto mejor es el conjunto de variables utilizado, mejores serán los resultados que se obtendrán, ya que mejores variables aportan:
+
+* Mayor flexibilidad
+* Modelos más simples
+
+Según **Locklin de Scott**, en [“Neglected machine learning ideas”](https://scottlocklin.wordpress.com/2014/07/22/neglected-machine-learning-ideas/):
+
+> La ingeniería de variables (feature engineering) es un tema que no parece merecer ningún artículo o libro, ni siquiera un capítulo de un libro, pero es absolutamente vital para el éxito de Machine Learning [...] Gran parte del éxito del Machine learning depende en realidad de la feature engineering.
+
+Por todo ello, se procede a la creación de varias columnas adicionales a las aportadas inicialmente. Sin variar el modelo de predicción utilizado, se comprueba que estas nuevas variables mejoran la exactitud de las predicciones y permiten avanzar en la [tabla de posiciones pública de Kaggle](https://www.kaggle.com/c/sf-crime/leaderboard).
+
+En concreto se crean las siguientes variables adicionales, por su posible relación con la tipología de los delitos:
+
+1. Aparte de las variables originales **X** (longitud), **Y** (latitud) y **PdDistrict** (distrito) se crean las siguientes variables relacionadas con el lugar del delito: 
+
+    * `Corner`: Es posible deducir de la variable **Address** si un delito se ha cometido en un bloque o en una esquina.
+    * `DistCentral`: Distancia a la posición de la Oficina de Policía Central (-122.409895,37.798706).
+    * `DistMin`: Distancia a la Oficina de Policía más cercana de las 10 existentes en la ciudad de San Francisco.
+
+2. Además de descomponer la variable Dates en las variables numéricas **Year, Month, Day, Hour y WeekDay** se añaden las siguientes a partir de la fecha en que se cometió el delito:
+
+    * `Holiday`: La librería _timeDate_ permite añadir una variable que indica si ese día era festivo o no. 
+    * `Night`: A partir de la hora, del mes y de los datos de la web [Gaisma](http://www.gaisma.com/en/location/san-francisco-california.html), es posible añadir una variable que indica si era de noche o no cuando se cometió el delito.
+    * `Temperature`: Variable con la temperatura media de ese día, según los datos de la [Universidad de Dayton](http://academic.udayton.edu/kissock/http/Weather/)
+    * `PRCP`: Variable que mide la cantidad de lluvia del día que se cometió el delito, con datos provenientes de [NOAA's National Centers for Environmental Information](http://www.ncdc.noaa.gov/)
+  
+```{r}
+
+# Address lng and lat from Google Geocode
+
+address_gps <- function(address) {
+  
+  root <- "http://maps.google.com/maps/api/geocode/json?address="
+  address_url <- URLencode(paste(root, address,", San Francisco, California, USA &sensor=false", sep = ""))
+  gps <- fromJSON(address_url,simplify = FALSE)
+  if(gps$status=="OK") {
+    lng <- gps$results[[1]]$geometry$location$lng
+    lat <- gps$results[[1]]$geometry$location$lat
+    return(c(lng, lat))
+  } else {
+    return(c(NA,NA))
+  }
+}
+
+modify_dataset <- function(df){
+  
+  # Modyfying outliers modifies X and Y of dataset if X=-120.50000 using column "Address"
+  
+  df$OldX <- df$X
+  df$OldY <- df$Y
+  df <- transform(df, X = ifelse(OldX == -120.5000, address_gps(Address)[1], OldX))
+  df <- transform(df, Y = ifelse(OldX == -120.5000, address_gps(Address)[2], OldY))
+  df$OldX <- NULL
+  df$OldY <- NULL
+  
+  # Modifying position features
+  
+  df$District <- as.numeric(as.factor(df$PdDistrict))
+  
+  # Adding feature block(0) vs corner(1)
+  
+  df$Corner <- as.factor(as.numeric(rowSums(as.data.frame(grepl("/", df$Address)))))
+  
+  # Adding distances to Police Stations 
+  
+  df$DistCentral <- sqrt((df$X+122.409895)^2+(df$Y-37.798706)^2) # Distance to Central Police Station
+  df$Dist02 <- sqrt((df$X+122.389289)^2+(df$Y-37.772515)^2) # Distance to Southern Police Station
+  df$Dist03 <- sqrt((df$X+122.398031)^2+(df$Y-37.729729)^2) # Distance to BayView Police Station
+  df$Dist04 <- sqrt((df$X+122.421979)^2+(df$Y-37.762829)^2) # Distance to Mission Police Station
+  df$Dist05 <- sqrt((df$X+122.432417)^2+(df$Y-37.780179)^2) # Distance to Northern Police Station
+  df$Dist06 <- sqrt((df$X+122.455195)^2+(df$Y-37.767784)^2) # Distance to ParkPolice Station
+  df$Dist07 <- sqrt((df$X+122.464477)^2+(df$Y-37.780021)^2) # Distance to Richmond Poli ce Station
+  df$Dist08 <- sqrt((df$X+122.446305)^2+(df$Y-37.724773)^2) # Distance to Ingleside Police Station
+  df$Dist09 <- sqrt((df$X+122.481471)^2+(df$Y-37.743708)^2) # Distance to Taraval Police Station
+  df$Dist10 <- sqrt((df$X+122.412927)^2+(df$Y-37.783663)^2) # Distance to Tenderloin Police Station
+  df$DistMin <- apply(df[,10:19],1,min)
+  df <- df[,-c(11:19)]
+  
+  # Modifying date features
+  
+  df$Year <- as.numeric(year(df$Dates))
+  df$Month <- as.numeric(month(df$Dates))
+  df$Day <- as.numeric(day(df$Dates))
+  df$Hour <- as.numeric(hour(df$Dates))
+  df$WeekDay <- as.numeric(wday(df$Dates))
+  
+  # Adding feature workday(0) vs holiday(1)
+  
+  df$Holiday <- as.Date(paste(df$Year, "-", df$Month, "-", df$Day, sep = ""))
+  df$Holiday <- as.numeric(isHoliday(as.timeDate(df$Holiday)))
+
+  # Adding feature day(0) vs night(1). See http://www.gaisma.com/en/location/san-francisco-california.html
+  
+  df$Night<- 0
+  df$Night[df$Month ==  1 & (df$Hour > 18 | df$Hour < 6)] <- 1
+  df$Night[df$Month ==  2 & (df$Hour > 19 | df$Hour < 6)] <- 1
+  df$Night[df$Month ==  3 & (df$Hour > 20 | df$Hour < 6)] <- 1
+  df$Night[df$Month ==  4 & (df$Hour > 21 | df$Hour < 5)] <- 1
+  df$Night[df$Month ==  5 & (df$Hour > 22 | df$Hour < 5)] <- 1
+  df$Night[df$Month ==  6 & (df$Hour > 22 | df$Hour < 5)] <- 1
+  df$Night[df$Month ==  7 & (df$Hour > 22 | df$Hour < 5)] <- 1
+  df$Night[df$Month ==  8 & (df$Hour > 21 | df$Hour < 5)] <- 1
+  df$Night[df$Month ==  9 & (df$Hour > 20 | df$Hour < 5)] <- 1
+  df$Night[df$Month == 10 & (df$Hour > 19 | df$Hour < 5)] <- 1
+  df$Night[df$Month == 11 & (df$Hour > 18 | df$Hour < 5)] <- 1
+  df$Night[df$Month == 12 & (df$Hour > 18 | df$Hour < 6)] <- 1
+  
+  # Adding daily weather conditions
+  
+  df$DATE <- df$Year*10000+df$Month*100+df$Day
+  
+  temperature <- read.csv("./data/daily_temperature_san_francisco.csv", header = FALSE)
+  temperature$DATE <- temperature$V3*10000+temperature$V1*100+temperature$V2
+  df <- merge(x = df, y = temperature, by = "DATE", all.x = TRUE)
+  df$Temperature <- df$V4
+  
+  precipitation <- read.csv("data/daily_precipitation_san_francisco.csv")
+  precipitation <- precipitation[precipitation$STATION=="GHCND:USW00023272",]
+  df <-  merge(x = df, y = precipitation, by = "DATE", all.x = TRUE)
+  
+  return(df)
+}
+
+# Train dataset preparation
+
+train$Descript <- NULL
+train$Resolution <- NULL
+train <- modify_dataset(train)
+train <- subset(train, , -c(DATE, Dates, DayOfWeek, PdDistrict, Address,
+                            V1, V2, V3, V4, STATION, STATION_NAME, AWND))
+
+# Test dataset preparation
+
+test <- modify_dataset(test)
+test <- subset(test, , -c(DATE, Dates, DayOfWeek, PdDistrict, Address,
+                          V1, V2, V3, V4, STATION, STATION_NAME, AWND))
+
+```
+
+## 4.- Introducción a xgboost: eXtreme Gradient Boosting
+
+XGBoost es una implementación del algoritmo **Gradient Boost**, el cual está basado en multitud de árboles de decisión. Inicialmente fue diseñado y desarrollado en C++ por Tianqi Chen, para posteriormente Tong He elaborar el paquete. Este último, no sólo es conocido por su rapidez y exactitud en la capacidad de predicción exacta, sino que aporta multitud de funciones que ayudan a entender el modelo fácilmente.
+
+Se da un formato más idóneo al dataset `training`, para el posterior tratamiento con xgboost. Adicionalmente, se segrega la columna `Category` en un dataframe numérico y ordenado `target` con las categorías de los delitos, comenzando por el cero tal y como requiere la librería xgboost.
+
+```{r}
+
+train$District <- as.factor(train$District)
+train$Corner <- as.factor(train$Corner)
+train$Year <- as.factor(train$Year)
+train$Month <- as.factor(train$Month)
+train$Day <- as.factor(train$Day)
+train$Hour <- as.factor(train$Hour)
+train$WeekDay <- as.factor(train$WeekDay)
+train$Night <- as.factor(train$Night)
+train$Holiday <- as.factor(train$Holiday)
+
+# Split dataframe, target = crime categories (0:38)
+
+cat_names <- levels(as.ordered(train$Category))
+target <- as.matrix(as.numeric(as.ordered(train$Category))-1)
+train$Category <- NULL
+
+# XGBoost data preparation
+
+matrix_train <- xgb.DMatrix(data.matrix(train), label = as.numeric(target))
+
+```
+
+## 5.- Cross Validation
+
+Dada la cantidad de recursos de procesamiento y de tiempo que requiere el proceso de cross validation aportado por xgboost, se procede a ejecutarlo en dos pasos: seleccionar los parámetros del booster óptimos y determinar el mejor número de iteraciones.
+
+Todo el proceso se hace con el objetivo de minimizar el parámetro  **multi-class logarithmic loss**, ya que es el utilizado por Kaggle en esta ocasión para [evaluar la exactitud de los trabajos](https://www.kaggle.com/c/sf-crime/details/evaluation)
+
+### Selección de parámetros del booster
+
+En este primer paso, **para un número de iteraciones fijo**, se determina el conjunto óptimo de parámetros del booster. Un bucle ejecuta repetidamente el proceso cross-validation variando el conjunto de parámetros de booster de forma aleatoria dentro de un rango determinado. 
+    
+```{r}
+
+fix_params <- list(booster = "gbtree", 
+                   objective = "multi:softprob", 
+                   eval_metric = "mlogloss")
+
+param_done <- TRUE
+if (param_done){
+  best_param <- read.csv("./data/result_param.csv", header = TRUE, sep = ",")
+} else {
+  best_param <- NULL
+  for (n in 0:150){
+    set.seed(1000+n)
+    tree_params <- list(eta = runif(1, 0.010, 0.04),
+                        max_depth = sample(5:8, 1),
+                        max_delta_step = sample(0:3, 1),
+                        subsample = runif(1, 0.7, 0.99),
+                        colsample_bytree = runif(1, 0.5, 0.99))
+    model_cv <- xgb.cv(param = append(fix_params,tree_params),
+                       data = matrix_train,
+                       nrounds = 5,
+                       nfold = 10,
+                       early.stop.round = 10,
+                       num_class = 39,
+                       verbose = 0)
+    new_line <- data.frame(eta = tree_params$eta,
+                           max_depth = tree_params$max_depth,
+                           max_delta_step = tree_params$max_delta_step,
+                           subsample = tree_params$subsample,
+                           colsample_bytree = tree_params$colsample_bytree,
+                           best_itr = which.min(model_cv$test.mlogloss.mean),
+                           best_mlogloss = min(model_cv$test.mlogloss.mean))
+    best_param <- rbind(best_param, new_line)
+  }
+  best_param <- best_param[order(best_param$best_mlogloss),]
+  write.csv(best_param,"./data/result_param.csv", row.names = FALSE)
+}
+
+best_param[1,1:5]
+
+```
+
+### Selección del número óptimo de iteraciones
+
+En este segundo paso, se determina el número de iteraciones que proporciona el resultado óptimo desde el punto de vista de overfitting, utilizando el conjunto de parámetro obtenidos en el paso anterior. 
+
+```{r}
+
+cv_done <- TRUE
+if (cv_done){
+  best <- read.csv("./data/result_cv.csv", header = TRUE)
+} else {
+  tree_params <- list(eta = param[1,1],
+                      max_depth = param[1,2],
+                      max_delta_step = param[1,3],
+                      subsample = param[1,4],
+                      colsample_bytree = param[1,5])
+  model_cv <- xgb.cv(param = append(fix_params,tree_params),
+                     data = matrix_train,
+                     nrounds = 1e4,
+                     nfold = 10,
+                     early.stop.round = 10,
+                     num_class = 39)
+  best <- data.frame(eta = tree_params$eta,
+                     max_depth = tree_params$max_depth,
+                     max_delta_step = tree_params$max_delta_step,
+                     subsample = tree_params$subsample,
+                     colsample_bytree = tree_params$colsample_bytree,
+                     best_itr = which.min(model_cv$test.mlogloss.mean),
+                     best_mlogloss = min(model_cv$test.mlogloss.mean))
+  write.csv(best,"./data/result_cv.csv", row.names = FALSE)
+}
+
+best[,6:7]
+
+```
+
+## 6.- Entrenamiento del modelo y predicción final.
+
+A continuación, se entrena el modelo sobre el conjunto de datos de training, pero esta vez utilizando los parámetros que maximizan el valor de `model_cv$test.mlogloss.mean` del anterior apartado de cross-validation. Finalmente, utilizando el modelo entrenado se predicen las categorías de los delitos utilizando los datos de test y se prepara el fichero para adjuntar en el portal de kaggle.
+
+```{r}
+# XGBoost model training
+
+model_done <- TRUE
+if (model_done){
+  model <- xgb.load("./data/xgb.model")
+  imp_matrix <- setDT(read.csv("data/result_imp.csv", header = TRUE))
+} else {
+  matrix_train <- xgb.DMatrix(data.matrix(train), label = as.numeric(target))
+  set.seed(1967)
+  fix_params <- list(booster = "gbtree", 
+                     objective = "multi:softprob", 
+                     eval_metric = "mlogloss")
+  best <- read.csv("./data/result_cv.csv", header = TRUE, sep = ",")
+  tree_params <- list(eta = best[1,1],
+                      max_depth = best[1,2],
+                      max_delta_step = best[1,3],
+                      subsample = best[1,4],
+                      colsample_bytree = best[1,5])
+  model <- xgboost(data = matrix_train, param = append(fix_params,tree_params), nrounds = best[1,6], num_class=39)
+  xgb.save(model,"./data/xgb.model")  
+
+  imp_matrix <- xgb.importance(feature_names = names(train), model = model)
+  write.csv(imp_matrix,"./data/result_imp.csv", row.names = FALSE)
+}
+
+# Preparing test dataset
+
+test$District <- as.factor(test$District)
+test$Corner <- as.factor(test$Corner)
+test$Year <- as.factor(test$Year)
+test$Month <- as.factor(test$Month)
+test$Day <- as.factor(test$Day)
+test$Hour <- as.factor(test$Hour)
+test$WeekDay <- as.factor(test$WeekDay)
+test$Night <- as.factor(test$Night)
+test$Holiday <- as.factor(test$Holiday)
+
+# Split dataframe Id
+
+test_id <- test$Id
+test$Id <- NULL
+
+# Predict test crime categories
+
+pred_test <- predict(model, data.matrix(test))
+prob_matrix <- matrix(pred_test, ncol = 39, byrow = T)
+
+# Preparing submission file
+
+submission <- as.data.frame(prob_matrix)
+colnames(submission) <- cat_names
+submission <- cbind(test_id,submission)
+colnames(submission)[1] <- "Id"
+write.csv(submission, "./data/submission.csv", row.names = FALSE)
+
+```
+
+
+### Resultado en Kaggle.
+
+A día 28 de Mayo de 2015, con una puntuación (mlogloss) de **2.33369** y a falta de 10 días para concluir la competición, la posición de la predicción efectuada en este proyecto ocupa la posición número **319 de 2164** equipos participantes en la [tabla pública de resultados de kaggle](https://www.kaggle.com/c/sf-crime/leaderboard).
+
+![](./images/position.jpg)
+
+## 7.- Conclusión
+
+La ejecución de la función `xgb.importance`, incluida en la librería de R xgboost, permite determinar en qué medida contribuye cada variable en la ejecución del modelo de predicción, tanto en ganancia en cada árbol como en el número de veces que esa variable ha sido incluida en un árbol.
+
+```{r fig.width=7, fig.height=7 }
+
+imp_matrix
+xgb.plot.importance(imp_matrix, numberOfClusters = 3)
+
+```
+
+Como puede observarse, las variables de posición contribuyen en mayor medida al modelo matemático que las temporales, siendo la longitud y latitud aquellas que más contribuyen a predecir la categoría del delito cometido. Así mismo, las variables adicionales relacionadas con la distancia entre el punto donde se cometió el delito y estaciones de policía son de gran importancia para categorizar los delitos cometidos en San Francisco.
+
+En cuanto a la estacionalidad de los delitos, la hora en que cometieron es el parámetro que más ayuda a categorizarlos, por encima de otros como la época del año, el día de la semana, o la nocturnidad. En concreto, llama la atención la mayor importancia de la variable `Year`, que las variables `WeekDay` y `Month`, lo que daría a entender que la morfología criminal depende más de una situación coyuntural a medio plazo que de una estacionalidad semanal o mensual.  Cabe mencionar que las condiciones meteorológicas ayudan a aumentar la exactitud a la hora de predecir qué tipo de delitos se cometen un día, siendo la temperatura media de mayor valor que el nivel de lluvia.
+
+En definitiva, a la hora planificar una política de seguridad ciudadana según la tipología de los delitos, es mucho más importante saber dónde se cometen que cuando se comenten.
+
+
+## 8.- Referencias
+
+* [XGBoost R Tutorial](https://github.com/dmlc/xgboost/blob/master/R-package/vignettes/xgboostPresentation.Rmd), de Tianqi Chen y Tong He
+* [XGBoost Parameters](https://github.com/dmlc/xgboost/blob/master/doc/parameter.md)
+* [XGBoost Documentation](https://xgboost-clone.readthedocs.io/en/latest/index.html), de xgboost developers
+* [Introduction to Feature Engineering](https://dato.com/learn/userguide/feature-engineering/introduction.html)
+* [Discover Feature Engineering](http://machinelearningmastery.com/discover-feature-engineering-how-to-engineer-features-and-how-to-get-good-at-it/), de Jason Brownlee
+* [Crime vs. Temperature](http://crime.static-eric.com/)
